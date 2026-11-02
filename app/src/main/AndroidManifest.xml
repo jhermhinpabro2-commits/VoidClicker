@@ -19,6 +19,7 @@
             android:name=".AutoTapService"
             android:exported="true"
             android:label="Void Clicker"
+            android:icon="@drawable/void_logo"
             android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
             <intent-filter>
                 <action android:name="android.accessibilityservice.AccessibilityService" />
