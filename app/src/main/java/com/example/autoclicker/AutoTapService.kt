@@ -527,6 +527,37 @@ class AutoTapService : AccessibilityService() {
         refreshUi()
     }
 
+    private val tapRunnable = object : Runnable {
+    override fun run() {
+        if (!running) return
+        // dito ang actual na pag-tap, halimbawa:
+        targets.forEach { performTap(it) }
+        clicks++
+        refreshUi()
+        handler.postDelayed(this, intervalMs)
+    }
+}
+
+private fun toggleRun() {
+    if (running) stopClicking() else startClicking()
+}
+
+private fun startClicking() {
+    if (targets.isEmpty() && mode == MODE_MULTI) return
+    commitInterval()
+    running = true
+    setTargetsPassThrough(true)
+    refreshUi()
+    handler.post(tapRunnable)
+}
+
+private fun stopClicking() {
+    running = false
+    handler.removeCallbacks(tapRunnable)
+    setTargetsPassThrough(false)
+    refreshUi()
+}
+
     private fun clearTargets() {
         stopClicking()
         targets.forEach { removeView(it.view) }
