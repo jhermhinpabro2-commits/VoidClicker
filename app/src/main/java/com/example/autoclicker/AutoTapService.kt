@@ -28,8 +28,6 @@ import android.widget.TextView
 import android.widget.Toast
 import kotlin.math.abs
 import kotlin.math.max
-import android.accessibilityservice.GestureDescription
-import android.graphics.Path
 
 class AutoTapService : AccessibilityService() {
 
