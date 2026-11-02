@@ -21,6 +21,7 @@ import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.TextView
 import android.widget.Toast
+import kotlin.math.abs
 
 class AutoTapService : AccessibilityService() {
 
@@ -33,7 +34,13 @@ class AutoTapService : AccessibilityService() {
     private var intervalMs = 500L
     private var totalClicks = 0L
 
-    private var panel: View? = null
+    private val widthOptions = intArrayOf(220, 260, 300, 340)
+    private var widthIndex = 2
+
+    private var panel: LinearLayout? = null
+    private var panelParams: WindowManager.LayoutParams? = null
+    private var bubble: ImageView? = null
+    private var bubbleParams: WindowManager.LayoutParams? = null
     private var intervalInput: EditText? = null
     private var startButton: Button? = null
     private var statusText: TextView? = null
@@ -66,7 +73,7 @@ class AutoTapService : AccessibilityService() {
                     moveTo(x, y)
                     lineTo(x + 1f, y + 1f)
                 }
-                builder.addStroke(GestureDescription.StrokeDescription(path, 0, 20))
+                builder.addStroke(GestureDescription.StrokeDescription(path, 0, 50))
             }
             dispatchGesture(builder.build(), null, null)
             totalClicks += targets.size
@@ -78,6 +85,8 @@ class AutoTapService : AccessibilityService() {
     override fun onServiceConnected() {
         super.onServiceConnected()
         wm = getSystemService(WINDOW_SERVICE) as WindowManager
+        buildPanel()
+        buildBubble()
         showPanel()
     }
 
@@ -89,37 +98,50 @@ class AutoTapService : AccessibilityService() {
 
     override fun onDestroy() {
         handler.removeCallbacksAndMessages(null)
-        if (::wm.isInitialized) {
-            targets.forEach { wm.removeView(it.view) }
-            panel?.let { wm.removeView(it) }
-        }
+        targets.forEach { safeRemove(it.view) }
+        targets.clear()
+        panel?.let { safeRemove(it) }
+        bubble?.let { safeRemove(it) }
+        panel = null
+        bubble = null
         super.onDestroy()
     }
 
-    // ---------- Panel ----------
+    // ---------- Panel and bubble ----------
 
-    private fun showPanel() {
+    private fun buildPanel() {
+        val logo = ImageView(this).apply {
+            setImageResource(R.drawable.void_logo)
+            scaleType = ImageView.ScaleType.FIT_CENTER
+        }
+
+        val titleBlock = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(12), 0, 0, 0)
+            addView(TextView(this@AutoTapService).apply {
+                text = "VOID CLICKER"
+                setTextColor(white)
+                textSize = 16f
+                typeface = mono(bold = true)
+                letterSpacing = 0.15f
+            })
+            addView(TextView(this@AutoTapService).apply {
+                text = "AUTO TAP // v2.3"
+                setTextColor(dim)
+                textSize = 10f
+                typeface = mono()
+                letterSpacing = 0.15f
+            })
+        }
+
         val header = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            addView(logoImage(), LinearLayout.LayoutParams(dp(56), dp(56)))
-            addView(LinearLayout(this@AutoTapService).apply {
-                orientation = LinearLayout.VERTICAL
-                setPadding(dp(16), 0, 0, 0)
-                addView(TextView(this@AutoTapService).apply {
-                    text = "VOID CLICKER"
-                    setTextColor(white)
-                    textSize = 17f
-                    typeface = mono(bold = true)
-                    letterSpacing = 0.18f
-                })
-                addView(TextView(this@AutoTapService).apply {
-                    text = "AUTO TAP // v2.3"
-                    setTextColor(dim)
-                    textSize = 10f
-                    typeface = mono()
-                    letterSpacing = 0.15f
-                })
+            addView(logo, LinearLayout.LayoutParams(dp(44), dp(44)))
+            addView(titleBlock, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+            addView(iconButton("−") { minimize() }, LinearLayout.LayoutParams(dp(36), dp(36)))
+            addView(iconButton("×") { closeAll() }, LinearLayout.LayoutParams(dp(36), dp(36)).apply {
+                leftMargin = dp(8)
             })
         }
 
@@ -138,7 +160,7 @@ class AutoTapService : AccessibilityService() {
         val counter = TextView(this).apply {
             text = "0"
             setTextColor(accent)
-            textSize = 40f
+            textSize = 36f
             typeface = mono(bold = true)
             gravity = Gravity.CENTER
         }
@@ -158,43 +180,115 @@ class AutoTapService : AccessibilityService() {
         val btnAdd = styledButton("ADD TARGET", filled = false) { addTarget() }
         val btnClear = styledButton("CLEAR TARGETS", filled = false) { clearTargets() }
         val btnReset = styledButton("RESET COUNT", filled = false) { resetCount() }
+        val btnSmaller = styledButton("SIZE −", filled = false) { resizePanel(-1) }
+        val btnBigger = styledButton("SIZE +", filled = false) { resizePanel(1) }
 
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(dp(24), dp(24), dp(24), dp(24))
+            setPadding(dp(16), dp(16), dp(16), dp(16))
             background = box(panelBg, white, 1, dp(4))
             addItem(header)
-            addItem(sectionLabel("INTERVAL (MS)"), top = dp(24))
-            addItem(interval, top = dp(8))
-            addItem(sectionLabel("TOTAL CLICKS"), top = dp(20))
-            addItem(counter, top = dp(4))
-            addItem(status, top = dp(8))
-            addItem(rowOf(btnStart, btnAdd), top = dp(24))
-            addItem(rowOf(btnClear, btnReset), top = dp(12))
+            addItem(sectionLabel("INTERVAL (MS)"), top = dp(18))
+            addItem(interval, top = dp(6))
+            addItem(sectionLabel("TOTAL CLICKS"), top = dp(14))
+            addItem(counter, top = dp(2))
+            addItem(status, top = dp(4))
+            addItem(rowOf(btnStart, btnAdd), top = dp(18))
+            addItem(rowOf(btnClear, btnReset), top = dp(10))
+            addItem(rowOf(btnSmaller, btnBigger), top = dp(10))
         }
 
         val params = WindowManager.LayoutParams(
-            dp(300),
+            dp(widthOptions[widthIndex]),
             WindowManager.LayoutParams.WRAP_CONTENT,
             WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
-            WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
+            WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS or
+                    WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL,
             PixelFormat.TRANSLUCENT
         ).apply {
             gravity = Gravity.TOP or Gravity.START
-            x = dp(16)
+            x = dp(12)
             y = dp(120)
         }
 
         makeDraggable(header, root, params)
         wm.addView(root, params)
         panel = root
+        panelParams = params
         updateStatus()
     }
+
+    private fun buildBubble() {
+        val view = ImageView(this).apply {
+            setImageResource(R.drawable.void_logo)
+            scaleType = ImageView.ScaleType.FIT_CENTER
+            setPadding(dp(12), dp(12), dp(12), dp(12))
+            background = box(black, white, 2, dp(40))
+        }
+        val params = WindowManager.LayoutParams(
+            dp(64),
+            dp(64),
+            WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
+            overlayFlags,
+            PixelFormat.TRANSLUCENT
+        ).apply {
+            gravity = Gravity.TOP or Gravity.START
+            x = dp(8)
+            y = dp(200)
+        }
+        makeDraggable(view, view, params) { togglePanel() }
+        wm.addView(view, params)
+        bubble = view
+        bubbleParams = params
+        view.visibility = View.GONE
+    }
+
+    private fun showPanel() {
+        panel?.visibility = View.VISIBLE
+        bubble?.visibility = View.GONE
+    }
+
+    private fun minimize() {
+        panel?.visibility = View.GONE
+        bubble?.visibility = View.VISIBLE
+    }
+
+    private fun togglePanel() {
+        if (panel?.visibility == View.VISIBLE) minimize() else showPanel()
+    }
+
+    private fun closeAll() {
+        stopTapping()
+        targets.forEach { safeRemove(it.view) }
+        targets.clear()
+        panel?.let { safeRemove(it) }
+        bubble?.let { safeRemove(it) }
+        panel = null
+        bubble = null
+        disableSelf()
+    }
+
+    private fun resizePanel(delta: Int) {
+        widthIndex = (widthIndex + delta).coerceIn(0, widthOptions.size - 1)
+        val p = panelParams ?: return
+        p.width = dp(widthOptions[widthIndex])
+        panel?.let { wm.updateViewLayout(it, p) }
+    }
+
+    private fun iconButton(label: String, onClick: () -> Unit): TextView =
+        TextView(this).apply {
+            text = label
+            gravity = Gravity.CENTER
+            setTextColor(white)
+            textSize = 18f
+            typeface = mono(bold = true)
+            background = box(black, white, 1, dp(4))
+            setOnClickListener { onClick() }
+        }
 
     private fun logoImage(): ImageView = ImageView(this).apply {
         setImageResource(R.drawable.void_logo)
         scaleType = ImageView.ScaleType.FIT_CENTER
-        adjustViewBounds = true
     }
 
     private fun sectionLabel(value: String): TextView = TextView(this).apply {
@@ -209,11 +303,11 @@ class AutoTapService : AccessibilityService() {
         Button(this).apply {
             text = value
             typeface = mono(bold = true)
-            textSize = 13f
-            letterSpacing = 0.15f
+            textSize = 12f
+            letterSpacing = 0.1f
             setTextColor(if (filled) black else white)
             background = if (filled) box(accent, accent, 1, dp(2)) else box(black, dim, 1, dp(2))
-            setPadding(0, dp(14), 0, dp(14))
+            setPadding(0, dp(12), 0, dp(12))
             setOnClickListener { onClick() }
         }
 
@@ -238,7 +332,7 @@ class AutoTapService : AccessibilityService() {
         orientation = LinearLayout.HORIZONTAL
         views.forEachIndexed { i, v ->
             addView(v, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply {
-                if (i > 0) leftMargin = dp(12)
+                if (i > 0) leftMargin = dp(10)
             })
         }
     }
@@ -290,7 +384,7 @@ class AutoTapService : AccessibilityService() {
             toast("Stop first before clearing")
             return
         }
-        targets.forEach { wm.removeView(it.view) }
+        targets.forEach { safeRemove(it.view) }
         targets.clear()
         updateStatus()
     }
@@ -331,6 +425,8 @@ class AutoTapService : AccessibilityService() {
         running = true
         setTargetsPassThrough(true)
         startButton?.text = "STOP"
+        minimize()
+        bubble?.background = box(black, accent, 2, dp(40))
         handler.post(tapRunnable)
         updateStatus()
     }
@@ -341,16 +437,23 @@ class AutoTapService : AccessibilityService() {
         handler.removeCallbacks(tapRunnable)
         setTargetsPassThrough(false)
         startButton?.text = "START"
+        bubble?.background = box(black, white, 2, dp(40))
         updateStatus()
     }
 
     // ---------- Helpers ----------
 
-    private fun makeDraggable(handle: View, target: View, params: WindowManager.LayoutParams) {
+    private fun makeDraggable(
+        handle: View,
+        target: View,
+        params: WindowManager.LayoutParams,
+        onTap: (() -> Unit)? = null
+    ) {
         var downRawX = 0f
         var downRawY = 0f
         var downX = 0
         var downY = 0
+        var moved = false
         handle.setOnTouchListener { _, e ->
             when (e.action) {
                 MotionEvent.ACTION_DOWN -> {
@@ -358,14 +461,28 @@ class AutoTapService : AccessibilityService() {
                     downRawY = e.rawY
                     downX = params.x
                     downY = params.y
+                    moved = false
                 }
                 MotionEvent.ACTION_MOVE -> {
-                    params.x = downX + (e.rawX - downRawX).toInt()
-                    params.y = downY + (e.rawY - downRawY).toInt()
+                    val dx = e.rawX - downRawX
+                    val dy = e.rawY - downRawY
+                    if (abs(dx) > 10 || abs(dy) > 10) moved = true
+                    params.x = downX + dx.toInt()
+                    params.y = downY + dy.toInt()
                     wm.updateViewLayout(target, params)
+                }
+                MotionEvent.ACTION_UP -> {
+                    if (!moved) onTap?.invoke()
                 }
             }
             true
+        }
+    }
+
+    private fun safeRemove(view: View) {
+        try {
+            wm.removeView(view)
+        } catch (_: Exception) {
         }
     }
 
