@@ -28,6 +28,8 @@ import android.widget.TextView
 import android.widget.Toast
 import kotlin.math.abs
 import kotlin.math.max
+import android.accessibilityservice.GestureDescription
+import android.graphics.Path
 
 class AutoTapService : AccessibilityService() {
 
@@ -538,6 +540,15 @@ class AutoTapService : AccessibilityService() {
     }
 }
 
+    private fun performTap(t: Target) {
+    val x = t.params.x + t.params.width / 2f
+    val y = t.params.y + t.params.height / 2f
+    val path = Path().apply { moveTo(x, y) }
+    val stroke = GestureDescription.StrokeDescription(path, 0, 50)
+    val gesture = GestureDescription.Builder().addStroke(stroke).build()
+    dispatchGesture(gesture, null, null)
+    }
+    
 private fun toggleRun() {
     if (running) stopClicking() else startClicking()
 }
