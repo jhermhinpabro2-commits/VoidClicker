@@ -2,6 +2,9 @@ package com.example.autoclicker
 
 import android.accessibilityservice.AccessibilityService
 import android.accessibilityservice.GestureDescription
+import android.annotation.SuppressLint
+import android.content.Context
+import android.content.Intent
 import android.graphics.Color
 import android.graphics.Path
 import android.graphics.PixelFormat
@@ -13,487 +16,588 @@ import android.text.InputType
 import android.view.Gravity
 import android.view.MotionEvent
 import android.view.View
+import android.view.ViewGroup
 import android.view.WindowManager
 import android.view.accessibility.AccessibilityEvent
-import android.widget.Button
+import android.view.inputmethod.EditorInfo
+import android.view.inputmethod.InputMethodManager
 import android.widget.EditText
 import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.TextView
 import android.widget.Toast
 import kotlin.math.abs
+import kotlin.math.max
 
 class AutoTapService : AccessibilityService() {
 
+    companion object {
+        const val MODE_NONE = 0
+        const val MODE_SINGLE = 1
+        const val MODE_MULTI = 2
+        private const val MAX_TARGETS = 10
+
+        @Volatile
+        var instance: AutoTapService? = null
+
+        // set by MainActivity before it opens Accessibility settings,
+        // so the service sends the user back to the home page once enabled
+        @Volatile
+        var returnHome = false
+    }
+
+    var mode = MODE_NONE
+        private set
+
     private class Target(val view: TextView, val params: WindowManager.LayoutParams)
 
-    private lateinit var wm: WindowManager
     private val handler = Handler(Looper.getMainLooper())
+    private lateinit var wm: WindowManager
     private val targets = mutableListOf<Target>()
-    private var running = false
-    private var intervalMs = 500L
-    private var totalClicks = 0L
 
-    private val widthOptions = intArrayOf(220, 260, 300, 340)
-    private var widthIndex = 2
-
-    private var panel: LinearLayout? = null
+    private var panel: View? = null
     private var panelParams: WindowManager.LayoutParams? = null
-    private var bubble: ImageView? = null
+    private var bubble: View? = null
     private var bubbleParams: WindowManager.LayoutParams? = null
+
+    private var countView: TextView? = null
+    private var statusView: TextView? = null
+    private var startBtn: TextView? = null
     private var intervalInput: EditText? = null
-    private var startButton: Button? = null
-    private var statusText: TextView? = null
-    private var counterText: TextView? = null
 
-    private val black = Color.BLACK
-    private val white = Color.WHITE
-    private val accent = 0xFF00E5FF.toInt()
-    private val dim = 0xFF6E6E6E.toInt()
-    private val panelBg = 0xF2060606.toInt()
+    private var running = false
+    private var clicks = 0
+    private var intervalMs = 500L
+    private var scale = 1f // one scale for everything, so boxes stay boxes
 
-    private val overlayFlags = WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
-            WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS
+    private val cyan = Color.parseColor("#00E5FF")
+    private val dim = Color.parseColor("#8A8F8C")
+    private val red = Color.parseColor("#FF5252")
 
-    private val targetSize: Int get() = dp(48)
-
-    private val tapRunnable = object : Runnable {
-        override fun run() {
-            if (!running) return
-            if (targets.isEmpty()) {
-                stopTapping()
-                return
-            }
-            val builder = GestureDescription.Builder()
-            val half = targetSize / 2
-            targets.forEach { t ->
-                val x = (t.params.x + half).toFloat()
-                val y = (t.params.y + half).toFloat()
-                val path = Path().apply {
-                    moveTo(x, y)
-                    lineTo(x + 1f, y + 1f)
-                }
-                builder.addStroke(GestureDescription.StrokeDescription(path, 0, 50))
-            }
-            dispatchGesture(builder.build(), null, null)
-            totalClicks += targets.size
-            counterText?.text = totalClicks.toString()
-            handler.postDelayed(this, intervalMs)
-        }
-    }
+    // ------------------------------------------------------------------
+    // lifecycle
+    // ------------------------------------------------------------------
 
     override fun onServiceConnected() {
         super.onServiceConnected()
-        wm = getSystemService(WINDOW_SERVICE) as WindowManager
-        buildPanel()
-        buildBubble()
-        showPanel()
+        wm = getSystemService(Context.WINDOW_SERVICE) as WindowManager
+        instance = this
+        if (returnHome) {
+            returnHome = false
+            goHome()
+        }
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {}
 
-    override fun onInterrupt() {
-        stopTapping()
+    override fun onInterrupt() {}
+
+    override fun onUnbind(intent: Intent?): Boolean {
+        closeAll()
+        mode = MODE_NONE
+        instance = null
+        return super.onUnbind(intent)
     }
 
     override fun onDestroy() {
-        handler.removeCallbacksAndMessages(null)
-        targets.forEach { safeRemove(it.view) }
-        targets.clear()
-        panel?.let { safeRemove(it) }
-        bubble?.let { safeRemove(it) }
-        panel = null
-        bubble = null
+        closeAll()
+        mode = MODE_NONE
+        instance = null
         super.onDestroy()
     }
 
-    // ---------- Panel and bubble ----------
-
-    private fun buildPanel() {
-        val logo = ImageView(this).apply {
-            setImageResource(R.drawable.void_logo)
-            scaleType = ImageView.ScaleType.FIT_CENTER
-        }
-
-        val titleBlock = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(dp(12), 0, 0, 0)
-            addView(TextView(this@AutoTapService).apply {
-                text = "VOID CLICKER"
-                setTextColor(white)
-                textSize = 16f
-                typeface = mono(bold = true)
-                letterSpacing = 0.15f
-            })
-            addView(TextView(this@AutoTapService).apply {
-                text = "AUTO TAP // v2.3"
-                setTextColor(dim)
-                textSize = 10f
-                typeface = mono()
-                letterSpacing = 0.15f
-            })
-        }
-
-        val header = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-            addView(logo, LinearLayout.LayoutParams(dp(44), dp(44)))
-            addView(titleBlock, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
-            addView(iconButton("−") { minimize() }, LinearLayout.LayoutParams(dp(36), dp(36)))
-            addView(iconButton("×") { closeAll() }, LinearLayout.LayoutParams(dp(36), dp(36)).apply {
-                leftMargin = dp(8)
-            })
-        }
-
-        val interval = EditText(this).apply {
-            setText("500")
-            inputType = InputType.TYPE_CLASS_NUMBER
-            setTextColor(white)
-            setHintTextColor(dim)
-            typeface = mono()
-            textSize = 16f
-            background = box(black, dim, 1, dp(2))
-            setPadding(dp(14), dp(12), dp(14), dp(12))
-        }
-        intervalInput = interval
-
-        val counter = TextView(this).apply {
-            text = "0"
-            setTextColor(accent)
-            textSize = 36f
-            typeface = mono(bold = true)
-            gravity = Gravity.CENTER
-        }
-        counterText = counter
-
-        val status = TextView(this).apply {
-            setTextColor(dim)
-            textSize = 11f
-            letterSpacing = 0.15f
-            gravity = Gravity.CENTER
-            typeface = mono()
-        }
-        statusText = status
-
-        val btnStart = styledButton("START", filled = true) { toggleRunning() }
-        startButton = btnStart
-        val btnAdd = styledButton("ADD TARGET", filled = false) { addTarget() }
-        val btnClear = styledButton("CLEAR TARGETS", filled = false) { clearTargets() }
-        val btnReset = styledButton("RESET COUNT", filled = false) { resetCount() }
-        val btnSmaller = styledButton("SIZE −", filled = false) { resizePanel(-1) }
-        val btnBigger = styledButton("SIZE +", filled = false) { resizePanel(1) }
-
-        val root = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(dp(16), dp(16), dp(16), dp(16))
-            background = box(panelBg, white, 1, dp(4))
-            addItem(header)
-            addItem(sectionLabel("INTERVAL (MS)"), top = dp(18))
-            addItem(interval, top = dp(6))
-            addItem(sectionLabel("TOTAL CLICKS"), top = dp(14))
-            addItem(counter, top = dp(2))
-            addItem(status, top = dp(4))
-            addItem(rowOf(btnStart, btnAdd), top = dp(18))
-            addItem(rowOf(btnClear, btnReset), top = dp(10))
-            addItem(rowOf(btnSmaller, btnBigger), top = dp(10))
-        }
-
-        val params = WindowManager.LayoutParams(
-            dp(widthOptions[widthIndex]),
-            WindowManager.LayoutParams.WRAP_CONTENT,
-            WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
-            WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS or
-                    WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL,
-            PixelFormat.TRANSLUCENT
-        ).apply {
-            gravity = Gravity.TOP or Gravity.START
-            x = dp(12)
-            y = dp(120)
-        }
-
-        makeDraggable(header, root, params)
-        wm.addView(root, params)
-        panel = root
-        panelParams = params
-        updateStatus()
-    }
-
-    private fun buildBubble() {
-        val view = ImageView(this).apply {
-            setImageResource(R.drawable.void_logo)
-            scaleType = ImageView.ScaleType.FIT_CENTER
-            setPadding(dp(12), dp(12), dp(12), dp(12))
-            background = box(black, white, 2, dp(40))
-        }
-        val params = WindowManager.LayoutParams(
-            dp(64),
-            dp(64),
-            WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
-            overlayFlags,
-            PixelFormat.TRANSLUCENT
-        ).apply {
-            gravity = Gravity.TOP or Gravity.START
-            x = dp(8)
-            y = dp(200)
-        }
-        makeDraggable(view, view, params) { togglePanel() }
-        wm.addView(view, params)
-        bubble = view
-        bubbleParams = params
-        view.visibility = View.GONE
-    }
-
-    private fun showPanel() {
-        panel?.visibility = View.VISIBLE
-        bubble?.visibility = View.GONE
-    }
-
-    private fun minimize() {
-        panel?.visibility = View.GONE
-        bubble?.visibility = View.VISIBLE
-    }
-
-    private fun togglePanel() {
-        if (panel?.visibility == View.VISIBLE) minimize() else showPanel()
-    }
-
-    private fun closeAll() {
-        stopTapping()
-        targets.forEach { safeRemove(it.view) }
-        targets.clear()
-        panel?.let { safeRemove(it) }
-        bubble?.let { safeRemove(it) }
-        panel = null
-        bubble = null
-        disableSelf()
-    }
-
-    private fun resizePanel(delta: Int) {
-        widthIndex = (widthIndex + delta).coerceIn(0, widthOptions.size - 1)
-        val p = panelParams ?: return
-        p.width = dp(widthOptions[widthIndex])
-        panel?.let { wm.updateViewLayout(it, p) }
-    }
-
-    private fun iconButton(label: String, onClick: () -> Unit): TextView =
-        TextView(this).apply {
-            text = label
-            gravity = Gravity.CENTER
-            setTextColor(white)
-            textSize = 18f
-            typeface = mono(bold = true)
-            background = box(black, white, 1, dp(4))
-            setOnClickListener { onClick() }
-        }
-
-    private fun logoImage(): ImageView = ImageView(this).apply {
-        setImageResource(R.drawable.void_logo)
-        scaleType = ImageView.ScaleType.FIT_CENTER
-    }
-
-    private fun sectionLabel(value: String): TextView = TextView(this).apply {
-        text = value
-        setTextColor(dim)
-        textSize = 10f
-        letterSpacing = 0.2f
-        typeface = mono()
-    }
-
-    private fun styledButton(value: String, filled: Boolean, onClick: () -> Unit): Button =
-        Button(this).apply {
-            text = value
-            typeface = mono(bold = true)
-            textSize = 12f
-            letterSpacing = 0.1f
-            setTextColor(if (filled) black else white)
-            background = if (filled) box(accent, accent, 1, dp(2)) else box(black, dim, 1, dp(2))
-            setPadding(0, dp(12), 0, dp(12))
-            setOnClickListener { onClick() }
-        }
-
-    private fun box(fill: Int, stroke: Int, strokeDp: Int, radiusPx: Int): GradientDrawable =
-        GradientDrawable().apply {
-            setColor(fill)
-            setStroke(dp(strokeDp), stroke)
-            cornerRadius = radiusPx.toFloat()
-        }
-
-    private fun mono(bold: Boolean = false): Typeface =
-        Typeface.create(Typeface.MONOSPACE, if (bold) Typeface.BOLD else Typeface.NORMAL)
-
-    private fun LinearLayout.addItem(view: View, top: Int = 0) {
-        addView(view, LinearLayout.LayoutParams(
-            LinearLayout.LayoutParams.MATCH_PARENT,
-            LinearLayout.LayoutParams.WRAP_CONTENT
-        ).apply { topMargin = top })
-    }
-
-    private fun rowOf(vararg views: View): LinearLayout = LinearLayout(this).apply {
-        orientation = LinearLayout.HORIZONTAL
-        views.forEachIndexed { i, v ->
-            addView(v, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply {
-                if (i > 0) leftMargin = dp(10)
-            })
-        }
-    }
-
-    // ---------- Targets ----------
-
-    private fun addTarget() {
-        if (running) {
-            toast("Stop first before adding targets")
-            return
-        }
-        if (targets.size >= 10) {
-            toast("Maximum of 10 targets")
-            return
-        }
-
-        val size = targetSize
-        val metrics = resources.displayMetrics
-
-        val tv = TextView(this).apply {
-            text = (targets.size + 1).toString()
-            gravity = Gravity.CENTER
-            setTextColor(accent)
-            typeface = mono(bold = true)
-            textSize = 15f
-            background = box(black, accent, 2, size / 2)
-        }
-
-        val params = WindowManager.LayoutParams(
-            size,
-            size,
-            WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
-            overlayFlags,
-            PixelFormat.TRANSLUCENT
-        ).apply {
-            gravity = Gravity.TOP or Gravity.START
-            x = metrics.widthPixels / 2 - size / 2
-            y = metrics.heightPixels / 3 + targets.size * dp(60)
-        }
-
-        makeDraggable(tv, tv, params)
-        wm.addView(tv, params)
-        targets.add(Target(tv, params))
-        updateStatus()
-    }
-
-    private fun clearTargets() {
-        if (running) {
-            toast("Stop first before clearing")
-            return
-        }
-        targets.forEach { safeRemove(it.view) }
-        targets.clear()
-        updateStatus()
-    }
-
-    private fun resetCount() {
-        if (running) {
-            toast("Stop first before resetting")
-            return
-        }
-        totalClicks = 0
-        counterText?.text = "0"
-    }
-
-    private fun setTargetsPassThrough(passThrough: Boolean) {
-        targets.forEach { t ->
-            t.params.flags = if (passThrough) {
-                overlayFlags or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
-            } else {
-                overlayFlags
-            }
-            t.view.alpha = if (passThrough) 0.4f else 1f
-            wm.updateViewLayout(t.view, t.params)
-        }
-    }
-
-    // ---------- Running ----------
-
-    private fun toggleRunning() {
-        if (running) stopTapping() else startTapping()
-    }
-
-    private fun startTapping() {
-        if (targets.isEmpty()) {
-            toast("Add at least one target")
-            return
-        }
-        intervalMs = intervalInput?.text?.toString()?.toLongOrNull()?.coerceAtLeast(50L) ?: 500L
-        running = true
-        setTargetsPassThrough(true)
-        startButton?.text = "STOP"
-        minimize()
-        bubble?.background = box(black, accent, 2, dp(40))
-        handler.post(tapRunnable)
-        updateStatus()
-    }
-
-    private fun stopTapping() {
-        if (!running) return
-        running = false
-        handler.removeCallbacks(tapRunnable)
-        setTargetsPassThrough(false)
-        startButton?.text = "START"
-        bubble?.background = box(black, white, 2, dp(40))
-        updateStatus()
-    }
-
-    // ---------- Helpers ----------
-
-    private fun makeDraggable(
-        handle: View,
-        target: View,
-        params: WindowManager.LayoutParams,
-        onTap: (() -> Unit)? = null
-    ) {
-        var downRawX = 0f
-        var downRawY = 0f
-        var downX = 0
-        var downY = 0
-        var moved = false
-        handle.setOnTouchListener { _, e ->
-            when (e.action) {
-                MotionEvent.ACTION_DOWN -> {
-                    downRawX = e.rawX
-                    downRawY = e.rawY
-                    downX = params.x
-                    downY = params.y
-                    moved = false
-                }
-                MotionEvent.ACTION_MOVE -> {
-                    val dx = e.rawX - downRawX
-                    val dy = e.rawY - downRawY
-                    if (abs(dx) > 10 || abs(dy) > 10) moved = true
-                    params.x = downX + dx.toInt()
-                    params.y = downY + dy.toInt()
-                    wm.updateViewLayout(target, params)
-                }
-                MotionEvent.ACTION_UP -> {
-                    if (!moved) onTap?.invoke()
-                }
-            }
-            true
-        }
-    }
-
-    private fun safeRemove(view: View) {
+    private fun goHome() {
+        val i = Intent(this, MainActivity::class.java).addFlags(
+            Intent.FLAG_ACTIVITY_NEW_TASK or
+                Intent.FLAG_ACTIVITY_CLEAR_TOP or
+                Intent.FLAG_ACTIVITY_SINGLE_TOP
+        )
         try {
-            wm.removeView(view)
+            startActivity(i)
         } catch (_: Exception) {
         }
     }
 
-    private fun updateStatus() {
-        val state = if (running) "RUNNING" else "STANDBY"
-        statusText?.text = "$state  //  ${targets.size} TARGET(S)"
+    // ------------------------------------------------------------------
+    // public API (used by MainActivity)
+    // ------------------------------------------------------------------
+
+    fun showMode(newMode: Int) {
+        closeAll()
+        mode = newMode
+        clicks = 0
+        panelParams = overlayParams(
+            ViewGroup.LayoutParams.WRAP_CONTENT,
+            ViewGroup.LayoutParams.WRAP_CONTENT,
+            dpFixed(16f), dpFixed(80f)
+        )
+        buildPanel()
+        addTarget()
     }
 
-    private fun dp(value: Int): Int = (value * resources.displayMetrics.density).toInt()
+    /** Closes the GUI and the target boxes. The accessibility service stays ON. */
+    fun hideAll() {
+        closeAll()
+        mode = MODE_NONE
+    }
 
-    private fun toast(msg: String) {
-        Toast.makeText(this, msg, Toast.LENGTH_SHORT).show()
+    // ------------------------------------------------------------------
+    // sizes / helpers
+    // ------------------------------------------------------------------
+
+    private fun dpFixed(v: Float) = (v * resources.displayMetrics.density).toInt()
+    private fun d(v: Float) = (v * scale * resources.displayMetrics.density).toInt()
+
+    private fun toast(msg: String) = Toast.makeText(this, msg, Toast.LENGTH_SHORT).show()
+
+    private fun overlayParams(w: Int, h: Int, x: Int, y: Int) = WindowManager.LayoutParams(
+        w, h,
+        WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
+        WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+            WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS or
+            WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
+        PixelFormat.TRANSLUCENT
+    ).apply {
+        gravity = Gravity.TOP or Gravity.START
+        this.x = x
+        this.y = y
+    }
+
+    private fun boxBg(fill: Int, radius: Float, strokeColor: Int? = null, strokeDp: Float = 1f) =
+        GradientDrawable().apply {
+            setColor(fill)
+            cornerRadius = d(radius).toFloat()
+            if (strokeColor != null) setStroke(max(1, d(strokeDp)), strokeColor)
+        }
+
+    private fun label(text: String, size: Float, color: Int, bold: Boolean = false) =
+        TextView(this).apply {
+            this.text = text
+            textSize = size * scale
+            setTextColor(color)
+            typeface = Typeface.create(Typeface.MONOSPACE, if (bold) Typeface.BOLD else Typeface.NORMAL)
+            letterSpacing = 0.06f
+            setSingleLine()
+        }
+
+    private fun styleBtn(tv: TextView, filled: Boolean, color: Int = cyan) {
+        if (filled) {
+            tv.setTextColor(Color.BLACK)
+            tv.background = boxBg(color, 8f)
+        } else {
+            tv.setTextColor(Color.WHITE)
+            tv.background = boxBg(Color.TRANSPARENT, 8f, Color.WHITE)
+        }
+    }
+
+    private fun actionBtn(text: String, filled: Boolean, onClick: () -> Unit) =
+        TextView(this).apply {
+            this.text = text
+            gravity = Gravity.CENTER
+            textSize = 10f * scale
+            typeface = Typeface.create(Typeface.MONOSPACE, Typeface.BOLD)
+            letterSpacing = 0.06f
+            setSingleLine()
+            styleBtn(this, filled)
+            setOnClickListener { onClick() }
+        }
+
+    private fun squareBtn(text: String, onClick: () -> Unit) =
+        TextView(this).apply {
+            this.text = text
+            gravity = Gravity.CENTER
+            textSize = 14f * scale
+            typeface = Typeface.create(Typeface.MONOSPACE, Typeface.BOLD)
+            setTextColor(Color.WHITE)
+            background = boxBg(Color.TRANSPARENT, 8f, Color.WHITE)
+            setOnClickListener { onClick() }
+        }
+
+    private fun addRow(parent: LinearLayout, a: View, b: View) {
+        val row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        row.addView(a, LinearLayout.LayoutParams(0, d(40f), 1f).apply { rightMargin = d(3f) })
+        row.addView(b, LinearLayout.LayoutParams(0, d(40f), 1f).apply { leftMargin = d(3f) })
+        parent.addView(
+            row,
+            LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
+            ).apply { topMargin = d(6f) }
+        )
+    }
+
+    @SuppressLint("ClickableViewAccessibility")
+    private fun makeDraggable(
+        handle: View,
+        params: WindowManager.LayoutParams,
+        window: View,
+        onClick: (() -> Unit)?
+    ) {
+        var sx = 0f
+        var sy = 0f
+        var ox = 0
+        var oy = 0
+        var moved = false
+        handle.setOnTouchListener { _, e ->
+            when (e.action) {
+                MotionEvent.ACTION_DOWN -> {
+                    sx = e.rawX; sy = e.rawY
+                    ox = params.x; oy = params.y
+                    moved = false
+                    true
+                }
+                MotionEvent.ACTION_MOVE -> {
+                    val dx = e.rawX - sx
+                    val dy = e.rawY - sy
+                    if (abs(dx) > 8 || abs(dy) > 8) moved = true
+                    if (moved) {
+                        params.x = ox + dx.toInt()
+                        params.y = oy + dy.toInt()
+                        try {
+                            wm.updateViewLayout(window, params)
+                        } catch (_: Exception) {
+                        }
+                    }
+                    true
+                }
+                MotionEvent.ACTION_UP -> {
+                    if (!moved) onClick?.invoke()
+                    true
+                }
+                else -> true
+            }
+        }
+    }
+
+    private fun removeView(v: View?) {
+        if (v == null) return
+        try {
+            wm.removeView(v)
+        } catch (_: Exception) {
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // panel (the GUI)
+    // ------------------------------------------------------------------
+
+    @SuppressLint("ClickableViewAccessibility")
+    private fun buildPanel() {
+        removeView(panel)
+        val p = panelParams ?: return
+
+        val root = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            minimumWidth = d(236f)
+            setPadding(d(12f), d(12f), d(12f), d(12f))
+            background = boxBg(Color.parseColor("#F2080808"), 14f, Color.parseColor("#55FFFFFF"))
+        }
+
+        // header (drag handle)
+        val header = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        header.addView(
+            ImageView(this).apply {
+                setImageResource(R.drawable.void_logo)
+                scaleType = ImageView.ScaleType.FIT_CENTER
+            },
+            LinearLayout.LayoutParams(d(34f), d(34f))
+        )
+        val titleBlock = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        titleBlock.addView(label("VOID CLICKER", 12f, Color.WHITE, true))
+        titleBlock.addView(
+            label(if (mode == MODE_SINGLE) "SINGLE TARGET" else "MULTI TARGETS", 8.5f, dim)
+        )
+        header.addView(
+            titleBlock,
+            LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+                .apply { leftMargin = d(8f) }
+        )
+        header.addView(
+            squareBtn("\u2212") { minimize() },
+            LinearLayout.LayoutParams(d(30f), d(30f)).apply { leftMargin = d(6f) }
+        )
+        header.addView(
+            squareBtn("\u00D7") { hideAll() },
+            LinearLayout.LayoutParams(d(30f), d(30f)).apply { leftMargin = d(6f) }
+        )
+        root.addView(header)
+        makeDraggable(header, p, root, null)
+
+        // interval
+        root.addView(
+            label("INTERVAL (MS)", 9f, dim),
+            LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT
+            ).apply { topMargin = d(12f) }
+        )
+        val input = EditText(this).apply {
+            setText(intervalMs.toString())
+            inputType = InputType.TYPE_CLASS_NUMBER
+            imeOptions = EditorInfo.IME_ACTION_DONE
+            setSingleLine()
+            setTextColor(Color.WHITE)
+            typeface = Typeface.MONOSPACE
+            textSize = 15f * scale
+            setPadding(d(10f), 0, d(10f), 0)
+            background = boxBg(Color.TRANSPARENT, 8f, Color.parseColor("#88FFFFFF"))
+            setOnTouchListener { _, e ->
+                if (e.action == MotionEvent.ACTION_DOWN) {
+                    setPanelFocusable(true)
+                    handler.postDelayed({
+                        intervalInput?.let {
+                            it.requestFocus()
+                            val imm = getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager
+                            imm.showSoftInput(it, InputMethodManager.SHOW_IMPLICIT)
+                        }
+                    }, 150)
+                }
+                false
+            }
+            setOnEditorActionListener { _, actionId, _ ->
+                if (actionId == EditorInfo.IME_ACTION_DONE) {
+                    commitInterval()
+                    true
+                } else false
+            }
+        }
+        intervalInput = input
+        root.addView(
+            input,
+            LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, d(44f))
+                .apply { topMargin = d(4f) }
+        )
+
+        // counter
+        root.addView(
+            label("TOTAL CLICKS", 9f, dim),
+            LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT
+            ).apply { topMargin = d(10f) }
+        )
+        val count = label("0", 34f, cyan, true).apply { gravity = Gravity.CENTER }
+        countView = count
+        root.addView(
+            count,
+            LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
+            )
+        )
+        val status = label("", 9.5f, dim).apply { gravity = Gravity.CENTER }
+        statusView = status
+        root.addView(
+            status,
+            LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
+            )
+        )
+
+        // buttons
+        val start = actionBtn("START", true) { toggleRun() }
+        startBtn = start
+        val reset = actionBtn("RESET COUNT", false) { clicks = 0; refreshUi() }
+        if (mode == MODE_MULTI) {
+            addRow(root, start, actionBtn("ADD TARGET", false) { addTarget() })
+            addRow(root, actionBtn("CLEAR TARGETS", false) { clearTargets() }, reset)
+        } else {
+            addRow(root, start, reset)
+        }
+        addRow(
+            root,
+            actionBtn("SIZE \u2212", false) { changeSize(-0.15f) },
+            actionBtn("SIZE +", false) { changeSize(0.15f) }
+        )
+
+        try {
+            wm.addView(root, p)
+        } catch (_: Exception) {
+        }
+        panel = root
+        refreshUi()
+    }
+
+    private fun setPanelFocusable(on: Boolean) {
+        val p = panelParams ?: return
+        val v = panel ?: return
+        p.flags = if (on) {
+            p.flags and WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE.inv()
+        } else {
+            p.flags or WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+        }
+        try {
+            wm.updateViewLayout(v, p)
+        } catch (_: Exception) {
+        }
+    }
+
+    private fun commitInterval() {
+        val input = intervalInput ?: return
+        val v = input.text.toString().toLongOrNull() ?: 500L
+        intervalMs = max(50L, v)
+        input.setText(intervalMs.toString())
+        input.clearFocus()
+        val imm = getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager
+        imm.hideSoftInputFromWindow(input.windowToken, 0)
+        setPanelFocusable(false)
+    }
+
+    private fun refreshUi() {
+        countView?.text = clicks.toString()
+        statusView?.text =
+            (if (running) "RUNNING" else "STANDBY") + " // " + targets.size + " TARGET(S)"
+        startBtn?.let {
+            it.text = if (running) "STOP" else "START"
+            styleBtn(it, true, if (running) red else cyan)
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // minimize / restore
+    // ------------------------------------------------------------------
+
+    private fun minimize() {
+        val p = panelParams ?: return
+        removeView(panel)
+        panel = null
+        val size = d(46f)
+        val bp = overlayParams(size, size, p.x, p.y)
+        bubbleParams = bp
+        val b = ImageView(this).apply {
+            setImageResource(R.drawable.void_logo)
+            scaleType = ImageView.ScaleType.FIT_CENTER
+            setPadding(d(4f), d(4f), d(4f), d(4f))
+            background = boxBg(Color.parseColor("#F2080808"), 12f, Color.parseColor("#88FFFFFF"))
+        }
+        makeDraggable(b, bp, b) { restore() }
+        try {
+            wm.addView(b, bp)
+        } catch (_: Exception) {
+        }
+        bubble = b
+    }
+
+    private fun restore() {
+        val bp = bubbleParams
+        val p = panelParams
+        if (bp != null && p != null) {
+            p.x = bp.x
+            p.y = bp.y
+        }
+        removeView(bubble)
+        bubble = null
+        buildPanel()
+    }
+
+    // ------------------------------------------------------------------
+    // targets (always square boxes)
+    // ------------------------------------------------------------------
+
+    private fun targetBg() = boxBg(Color.parseColor("#B000E5FF"), 8f, Color.WHITE, 2f)
+
+    private fun addTarget() {
+        if (mode == MODE_SINGLE && targets.isNotEmpty()) return
+        if (targets.size >= MAX_TARGETS) {
+            toast("Max $MAX_TARGETS targets")
+            return
+        }
+        val size = d(52f)
+        val tv = TextView(this).apply {
+            text = (targets.size + 1).toString()
+            gravity = Gravity.CENTER
+            setTextColor(Color.BLACK)
+            typeface = Typeface.create(Typeface.MONOSPACE, Typeface.BOLD)
+            textSize = 14f * scale
+            background = targetBg()
+        }
+        val dm = resources.displayMetrics
+        val offset = targets.size * dpFixed(24f)
+        val p = overlayParams(
+            size, size,
+            dm.widthPixels / 2 - size / 2 + offset,
+            dm.heightPixels / 2 - size / 2 + offset
+        )
+        if (running) p.flags = p.flags or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
+        makeDraggable(tv, p, tv, null)
+        try {
+            wm.addView(tv, p)
+        } catch (_: Exception) {
+        }
+        targets.add(Target(tv, p))
+        refreshUi()
+    }
+
+    private fun clearTargets() {
+        stopClicking()
+        targets.forEach { removeView(it.view) }
+        targets.clear()
+        refreshUi()
+    }
+
+    private fun setTargetsPassThrough(on: Boolean) {
+        targets.forEach { t ->
+            t.params.flags = if (on) {
+                t.params.flags or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
+            } else {
+                t.params.flags and WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE.inv()
+            }
+            try {
+                wm.updateViewLayout(t.view, t.params)
+            } catch (_: Exception) {
+            }
+        }
+    }
+
+    /** Same scale for panel and target boxes: width == height always. */
+    private fun changeSize(delta: Float) {
+        val newScale = (scale + delta).coerceIn(0.6f, 1.6f)
+        if (newScale == scale) return
+        val oldSize = d(52f)
+        scale = newScale
+        val newSize = d(52f)
+        targets.forEach { t ->
+            t.params.x += (oldSize - newSize) / 2 // shrink/grow around the center
+            t.params.y += (oldSize - newSize) / 2
+            t.params.width = newSize
+            t.params.height = newSize
+            t.view.textSize = 14f * scale
+            try {
+                wm.updateViewLayout(t.view, t.params)
+            } catch (_: Exception) {
+            }
+        }
+        if (panel != null) buildPanel()
+        if (bubble != null) {
+            val bp = bubbleParams
+            val b = bubble
+            if (bp != null && b != null) {
+                bp.width = d(46f)
+                bp.height = d(46f)
+                try {
+                    wm.updateViewLayout(b, bp)
+                } catch (_: Exception) {
+                }
+            }
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // cleanup
+    // ------------------------------------------------------------------
+
+    private fun closeAll() {
+        running = false
+        handler.removeCallbacks(tapRunnable)
+        if (!::wm.isInitialized) return
+        removeView(panel)
+        removeView(bubble)
+        targets.forEach { removeView(it.view) }
+        targets.clear()
+        panel = null
+        bubble = null
+        countView = null
+        statusView = null
+        startBtn = null
+        intervalInput = null
     }
 }
